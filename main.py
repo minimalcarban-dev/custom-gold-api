@@ -16,11 +16,10 @@ app.add_middleware(
 TROY_OZ_TO_GRAM = 31.1035
 TOLA = 11.6638   # grams per tola
 
-
 def scrape_goodreturns():
-    """Primary source: actual IBJA Indian market gold rate"""
+    """Goodreturns homepage ticker se rate lo — reliable method"""
     try:
-        url = "https://www.goodreturns.in/gold-rates/"
+        url = "https://www.goodreturns.in/"
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -30,61 +29,82 @@ def scrape_goodreturns():
         resp = requests.get(url, headers=headers, timeout=12)
         soup = BeautifulSoup(resp.text, "lxml")
 
-        rates = {}
-        for row in soup.select("table tr"):
-            text = row.get_text(separator=" ", strip=True)
-            nums = [
-                float(n.replace(",", ""))
-                for n in re.findall(r"[\d,]{5,}", text)
-            ]
-            valid = [n for n in nums if 40000 < n < 300000]
+        # Goodreturns ticker mein exactly "22k Gold ₹ 13,975/gm" format hota hai
+        rate_22k = None
+        for tag in soup.find_all(string=re.compile(r'22k\s*Gold', re.I)):
+            match = re.search(r'[\d,]+', tag.parent.get_text())
+            if match:
+                rate_22k = float(match.group().replace(',', ''))
+                break
 
-            if re.search(r"22\s*k|22\s*carat", text, re.I) and valid:
-                rates["22k_10g"] = valid[0]
-            if re.search(r"24\s*k|24\s*carat", text, re.I) and valid:
-                rates["24k_10g"] = valid[0]
+        # Agar ticker se nahi mila toh page mein dhundo
+        if not rate_22k:
+            for tag in soup.find_all(string=re.compile(r'[\d]{4,5}')):
+                text = tag.parent.get_text(strip=True)
+                if '22' in text:
+                    match = re.search(r'(\d{4,6})', text.replace(',',''))
+                    if match:
+                        val = float(match.group())
+                        if 8000 < val < 25000:
+                            rate_22k = val
+                            break
 
-        if "22k_10g" in rates and "24k_10g" in rates:
-            g22 = rates["22k_10g"] / 10
-            g24 = rates["24k_10g"] / 10
+        if rate_22k:
+            # 24K = 22K / 0.9167 (purity ratio)
+            rate_24k = round(rate_22k / (22/24), 2)
+            g22, g24 = rate_22k, rate_24k
             return {
-                "22k": {"per_gram": round(g22, 2),
-                        "per_10g": round(g22 * 10, 2),
-                        "per_tola": round(g22 * TOLA, 2)},
-                "24k": {"per_gram": round(g24, 2),
-                        "per_10g": round(g24 * 10, 2),
-                        "per_tola": round(g24 * TOLA, 2)},
+                "22k": {
+                    "per_gram": g22,
+                    "per_10g": round(g22 * 10, 2),
+                    "per_tola": round(g22 * TOLA, 2)
+                },
+                "24k": {
+                    "per_gram": g24,
+                    "per_10g": round(g24 * 10, 2),
+                    "per_tola": round(g24 * TOLA, 2)
+                },
                 "source": "goodreturns.in (IBJA rate)",
                 "accuracy": "actual Indian market rate",
             }
     except Exception as e:
-        print(f"Scraping failed: {e}")
+        print(f"Scraping error: {e}")
     return None
 
 
 def get_yfinance_rate():
-    """Fallback: international spot price + India import duties"""
+    """Fallback: international spot price + India 2026 import duties"""
+    # 1. Get Live Data
     gold_usd_oz = yf.Ticker("GC=F").fast_info.last_price
     usd_inr     = yf.Ticker("USDINR=X").fast_info.last_price
 
+    # 2. Convert to Base INR per Gram
     intl_per_gram = (gold_usd_oz / TROY_OZ_TO_GRAM) * usd_inr
 
-    # India duties (2024): customs 6% + AIDC 5% + SWS ~0.6% + GST 3%
-    # Effective multiplier: ~1.15
-    g24 = round(intl_per_gram * 1.15, 2)
+    # 3. Apply 2026 Duties
+    # Total Import Duty (BCD 5% + AIDC 1%) = 6%
+    # GST on the landed cost = 3%
+    # Effective tax = 1.06 (Import) * 1.03 (GST) = 1.0918
+    INDIA_DUTY_MULTIPLIER = 1.0918 
+    
+    g24 = round(intl_per_gram * INDIA_DUTY_MULTIPLIER, 2)
     g22 = round(g24 * (22 / 24), 2)
 
     return {
-        "22k": {"per_gram": g22,
-                "per_10g": round(g22 * 10, 2),
-                "per_tola": round(g22 * TOLA, 2)},
-        "24k": {"per_gram": g24,
-                "per_10g": round(g24 * 10, 2),
-                "per_tola": round(g24 * TOLA, 2)},
+        "22k": {
+            "per_gram": g22,
+            "per_10g": round(g22 * 10, 2),
+            "per_tola": round(g22 * TOLA, 2)
+        },
+        "24k": {
+            "per_gram": g24,
+            "per_10g": round(g24 * 10, 2),
+            "per_tola": round(g24 * TOLA, 2)
+        },
         "gold_usd_per_oz": round(gold_usd_oz, 2),
         "usd_inr_rate": round(usd_inr, 4),
-        "source": "Yahoo Finance (calculated)",
-        "accuracy": "approx — intl spot + India duties",
+        "source": "Yahoo Finance (2026 Duty Logic)",
+        "accuracy": "9.18% total tax applied (6% Import + 3% GST)",
     }
 
 
